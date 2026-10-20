@@ -33,33 +33,84 @@ function log(level, message, details = {}) {
 // 2. CLOUDINARY INITIALIZATION
 // ==========================================
 
-try {
-    log('INFO', 'Cloudinary initialization started');
+// Initialize Cloudinary once per serverless instance.
+// Cache the promise so concurrent requests don't
+// repeatedly initialize the connection.
 
-    const startTime = performance.now();
+let cloudinaryInitialization;
 
-    await connectCloudinary();
+function initializeCloudinary() {
+    if (!cloudinaryInitialization) {
+        cloudinaryInitialization = (async () => {
+            log('INFO', 'Cloudinary initialization started');
 
-    log('INFO', 'Cloudinary initialization completed', {
-        durationMs: Number(
-            (performance.now() - startTime).toFixed(2)
-        )
-    });
-} catch (error) {
-    log('ERROR', 'Cloudinary initialization failed', {
-        errorName: error.name,
-        message: error.message
-    });
+            const startTime = performance.now();
 
-    process.exit(1);
+            await connectCloudinary();
+
+            log('INFO', 'Cloudinary initialization completed', {
+                durationMs: Number(
+                    (performance.now() - startTime).toFixed(2)
+                )
+            });
+        })().catch((error) => {
+            // Allow a later request to retry initialization.
+            cloudinaryInitialization = undefined;
+
+            log('ERROR', 'Cloudinary initialization failed', {
+                errorName: error.name,
+                message: error.message
+            });
+
+            throw error;
+        });
+    }
+
+    return cloudinaryInitialization;
 }
+
+// Initialize Cloudinary before processing each request.
+// The promise is cached after successful initialization.
+app.use(async (req, res, next) => {
+    try {
+        await initializeCloudinary();
+        next();
+    } catch (error) {
+        if (res.headersSent) {
+            return next(error);
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Service initialization failed'
+        });
+    }
+});
 
 // ==========================================
 // 3. BASIC MIDDLEWARE
 // ==========================================
 
 // Enable cross-origin requests.
-app.use(cors());
+// Restrict allowed origins to your frontend in production.
+const allowedOrigins = [
+    process.env.CLIENT_URL,
+    'http://localhost:5173'
+].filter(Boolean);
+
+app.use(
+    cors({
+        origin(origin, callback) {
+            // Allow requests without an Origin header,
+            // such as server-to-server requests.
+            if (!origin || allowedOrigins.includes(origin)) {
+                return callback(null, true);
+            }
+
+            return callback(new Error('Origin not allowed by CORS'));
+        }
+    })
+);
 
 // Parse incoming JSON request bodies.
 app.use(express.json());
@@ -72,11 +123,9 @@ app.use((req, res, next) => {
     const requestId = randomUUID();
     const startTime = performance.now();
 
-    // Attach request information for downstream handlers.
     req.requestId = requestId;
     req.startTime = startTime;
 
-    // Return the request ID to the client.
     res.setHeader('X-Request-ID', requestId);
 
     log('INFO', 'Incoming HTTP request', {
@@ -85,7 +134,6 @@ app.use((req, res, next) => {
         path: req.path
     });
 
-    // Log the final response status and duration.
     res.on('finish', () => {
         log('INFO', 'HTTP request completed', {
             requestId,
@@ -105,8 +153,6 @@ app.use((req, res, next) => {
 // 5. CLERK MIDDLEWARE
 // ==========================================
 
-// Makes Clerk authentication information available
-// to routes and authentication middleware.
 app.use(clerkMiddleware());
 
 // ==========================================
@@ -125,13 +171,7 @@ app.get('/', (req, res) => {
 // 7. APPLICATION ROUTES
 // ==========================================
 
-// Authentication is handled by the individual routes.
-// Protected routes use the custom auth middleware.
-
-// AI endpoints.
 app.use('/api/ai', aiRouter);
-
-// User endpoints.
 app.use('/api/user', userRouter);
 
 // ==========================================
@@ -165,7 +205,6 @@ app.use((error, req, res, next) => {
         message: error.message
     });
 
-    // Headers may already have been sent.
     if (res.headersSent) {
         return next(error);
     }
@@ -187,44 +226,55 @@ app.use((error, req, res, next) => {
 });
 
 // ==========================================
-// 10. START SERVER
+// 10. EXPORT APPLICATION FOR VERCEL
 // ==========================================
 
-const PORT = process.env.PORT || 3000;
+// Vercel imports this Express application.
+// Do not call app.listen() in the serverless entry point.
 
-const server = app.listen(PORT, () => {
-    log('INFO', 'Server started successfully', {
-        port: PORT,
-        environment: process.env.NODE_ENV || 'development'
-    });
-});
+export default app;
 
 // ==========================================
-// 11. PROCESS-LEVEL ERROR HANDLING
+// 11. LOCAL DEVELOPMENT SERVER
 // ==========================================
 
-// Log unexpected promise rejections.
-process.on('unhandledRejection', (reason) => {
-    log('ERROR', 'Unhandled promise rejection', {
-        message: reason instanceof Error
-            ? reason.message
-            : String(reason)
-    });
-});
+// Start a persistent server only when running locally.
+// Vercel sets VERCEL=1 in its deployment environment.
 
-// Shut down after an uncaught exception.
-process.on('uncaughtException', (error) => {
-    log('FATAL', 'Uncaught exception', {
-        errorName: error.name,
-        message: error.message
+if (!process.env.VERCEL) {
+    const PORT = process.env.PORT || 3000;
+
+    const server = app.listen(PORT, () => {
+        log('INFO', 'Server started successfully', {
+            port: PORT,
+            environment: process.env.NODE_ENV || 'development'
+        });
     });
 
-    server.close(() => {
-        process.exit(1);
+    // ==========================================
+    // 12. PROCESS-LEVEL ERROR HANDLING
+    // ==========================================
+
+    process.on('unhandledRejection', (reason) => {
+        log('ERROR', 'Unhandled promise rejection', {
+            message: reason instanceof Error
+                ? reason.message
+                : String(reason)
+        });
     });
 
-    // Prevent the process from hanging indefinitely.
-    setTimeout(() => {
-        process.exit(1);
-    }, 5000).unref();
-});
+    process.on('uncaughtException', (error) => {
+        log('FATAL', 'Uncaught exception', {
+            errorName: error.name,
+            message: error.message
+        });
+
+        server.close(() => {
+            process.exit(1);
+        });
+
+        setTimeout(() => {
+            process.exit(1);
+        }, 5000).unref();
+    });
+}
