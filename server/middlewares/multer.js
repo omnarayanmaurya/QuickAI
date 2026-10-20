@@ -22,7 +22,12 @@ function log(level, message, details = {}) {
 // 2. TEMPORARY UPLOAD DIRECTORY
 // ==========================================
 
-const uploadDir = path.join(process.cwd(), 'uploads');
+// Vercel: use its writable temporary directory.
+// Local development: use the project's uploads directory.
+
+const uploadDir = process.env.VERCEL
+    ? '/tmp'
+    : path.join(process.cwd(), 'uploads');
 
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -41,6 +46,13 @@ const allowedMimeTypes = new Set([
     'image/png',
     'image/webp',
     'application/pdf'
+]);
+
+const imageExtensions = new Set([
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.webp'
 ]);
 
 // ==========================================
@@ -69,6 +81,7 @@ const storage = multer.diskStorage({
 function fileFilter(req, file, cb) {
     const requestId = req.requestId || 'unknown';
 
+    // Check the MIME type.
     if (!allowedMimeTypes.has(file.mimetype)) {
         log('WARN', 'Upload rejected: unsupported MIME type', {
             requestId,
@@ -84,15 +97,9 @@ function fileFilter(req, file, cb) {
         return cb(error);
     }
 
+    // Check the file extension.
     const extension = path.extname(file.originalname)
         .toLowerCase();
-
-    const imageExtensions = new Set([
-        '.jpg',
-        '.jpeg',
-        '.png',
-        '.webp'
-    ]);
 
     const isImage = file.mimetype.startsWith('image/');
     const isPdf = file.mimetype === 'application/pdf';
@@ -128,7 +135,7 @@ export const upload = multer({
     fileFilter,
 
     limits: {
-        fileSize: 5 * 1024 * 1024,
+        fileSize: 5 * 1024 * 1024, // 5 MB maximum
         files: 1
     }
 });
