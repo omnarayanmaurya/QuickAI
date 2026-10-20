@@ -5,7 +5,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { v2 as cloudinary } from 'cloudinary';
 import FileSystem from 'fs';
-import { PDFParse } from 'pdf-parse';
+import pdf from 'pdf-parse/lib/pdf-parse.js';
 import { randomUUID } from 'crypto';
 import { performance } from 'node:perf_hooks';
 
@@ -1191,8 +1191,6 @@ export const resumeReview = async (req, res) => {
 
     log(requestId, 'RESUME REVIEW REQUEST RECEIVED');
 
-    let parser;
-
     try {
         const userId = getRequestUser(req);
         const resume = req.file;
@@ -1206,6 +1204,10 @@ export const resumeReview = async (req, res) => {
             mimetype: resume?.mimetype
         });
 
+        // ==========================================
+        // 1. VALIDATE USER PLAN
+        // ==========================================
+
         if (plan !== 'premium') {
             return sendValidationError(
                 requestId,
@@ -1216,6 +1218,10 @@ export const resumeReview = async (req, res) => {
                 requestStart
             );
         }
+
+        // ==========================================
+        // 2. VALIDATE UPLOADED FILE
+        // ==========================================
 
         if (!resume) {
             return sendValidationError(
@@ -1255,6 +1261,10 @@ export const resumeReview = async (req, res) => {
             );
         }
 
+        // ==========================================
+        // 3. EXTRACT PDF TEXT
+        // ==========================================
+
         const pdfTimer = createTimer(
             requestId,
             'PDF TEXT EXTRACTION'
@@ -1268,11 +1278,9 @@ export const resumeReview = async (req, res) => {
                     resume.path
                 );
 
-            parser = new PDFParse({
-                data: dataBuffer
-            });
-
-            const pdfData = await parser.getText();
+            // pdf-parse@1.1.1 accepts a PDF buffer
+            // and returns an object containing extracted text.
+            const pdfData = await pdf(dataBuffer);
 
             resumeText = pdfData.text?.trim();
 
@@ -1289,6 +1297,10 @@ export const resumeReview = async (req, res) => {
             throw error;
         }
 
+        // ==========================================
+        // 4. VALIDATE EXTRACTED TEXT
+        // ==========================================
+
         if (!resumeText) {
             return sendValidationError(
                 requestId,
@@ -1300,6 +1312,10 @@ export const resumeReview = async (req, res) => {
                 requestStart
             );
         }
+
+        // ==========================================
+        // 5. PREPARE AI REVIEW PROMPT
+        // ==========================================
 
         const reviewPrompt = `
 Review the following resume as an experienced technical recruiter.
@@ -1322,6 +1338,10 @@ Do not invent qualifications or experience.
 RESUME CONTENT:
 ${resumeText}
 `;
+
+        // ==========================================
+        // 6. REQUEST GEMINI REVIEW
+        // ==========================================
 
         const aiTimer = createTimer(
             requestId,
@@ -1363,6 +1383,10 @@ ${resumeText}
             throw error;
         }
 
+        // ==========================================
+        // 7. VALIDATE AI RESPONSE
+        // ==========================================
+
         const review = getAIContent(response);
 
         logAIResponse(requestId, response, review);
@@ -1377,6 +1401,10 @@ ${resumeText}
                 requestStart
             );
         }
+
+        // ==========================================
+        // 8. SAVE REVIEW TO DATABASE
+        // ==========================================
 
         await saveCreation(
             requestId,
@@ -1398,6 +1426,10 @@ ${resumeText}
                 )
             `
         );
+
+        // ==========================================
+        // 9. LOG COMPLETION AND RETURN RESPONSE
+        // ==========================================
 
         logRequestCompleted(
             requestId,
@@ -1425,30 +1457,9 @@ ${resumeText}
             res
         );
     } finally {
-        if (parser) {
-            const parserTimer = createTimer(
-                requestId,
-                'PDF PARSER CLEANUP'
-            );
-
-            try {
-                await parser.destroy();
-
-                parserTimer.end({
-                    status: 'success'
-                });
-            } catch (error) {
-                parserTimer.end({
-                    status: 'failed'
-                });
-
-                logError(
-                    requestId,
-                    'PDF PARSER CLEANUP FAILED',
-                    error
-                );
-            }
-        }
+        // ==========================================
+        // 10. CLEAN UP TEMPORARY UPLOAD
+        // ==========================================
 
         await cleanupTemporaryFile(
             requestId,
