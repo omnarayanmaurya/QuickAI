@@ -24,8 +24,7 @@ QuickAI is a full-stack AI-powered SaaS application that brings multiple AI tool
 - React.js
 - Vite
 - JavaScript
-- HTML5
-- CSS3
+
 
 ### Backend
 - Node.js
